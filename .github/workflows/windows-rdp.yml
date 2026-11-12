@@ -8,10 +8,10 @@ on:
         required: true
         default: 'github-win'
       username:
-        description: '2. Tên đăng nhập (Bỏ trống để tạo ngẫu nhiên)'
+        description: '2. Tên đăng nhập (Bỏ trống để ngẫu nhiên)'
         required: false
       password:
-        description: '3. Mật khẩu (Bỏ trống để tạo ngẫu nhiên)'
+        description: '3. Mật khẩu (Bỏ trống để ngẫu nhiên)'
         required: false
 
 jobs:
@@ -32,32 +32,37 @@ jobs:
         powercfg /change hibernate-timeout-ac 0
         Set-MpPreference -DisableRealtimeMonitoring $true
         
+        # --- TẮT CHÍNH SÁCH MẬT KHẨU PHỨC TẠP CỦA WINDOWS ---
+        secedit /export /cfg C:\secpol.cfg
+        (Get-Content C:\secpol.cfg).replace("PasswordComplexity = 1", "PasswordComplexity = 0") | Set-Content C:\secpol.cfg
+        secedit /configure /db C:\windows\security\local.sdb /cfg C:\secpol.cfg /areas SECURITYPOLICY
+        
         # --- XỬ LÝ TÊN ĐĂNG NHẬP ---
         $inputUser = "${{ github.event.inputs.username }}"
         if ([string]::IsNullOrWhiteSpace($inputUser)) {
-            # Nếu bỏ trống thì tạo ngẫu nhiên
             $randUser = "user" + (Get-Random -Minimum 1000 -Maximum 9999)
         } else {
-            # Nếu có nhập thì lấy tên đã nhập
             $randUser = $inputUser
         }
 
         # --- XỬ LÝ MẬT KHẨU ---
         $inputPass = "${{ github.event.inputs.password }}"
         if ([string]::IsNullOrWhiteSpace($inputPass)) {
-            # Nếu bỏ trống thì tạo ngẫu nhiên (Đảm bảo đủ độ mạnh cho Windows)
             $randPass = "P@" + (Get-Random -Minimum 10000 -Maximum 99999) + "abc!"
         } else {
-            # Nếu có nhập thì lấy pass đã nhập
             $randPass = $inputPass
         }
         
         # Tạo user trên Windows
         net user $randUser $randPass /add
+        
+        # Phân quyền (nếu tạo user thành công thì bước này sẽ chạy)
         net localgroup administrators $randUser /add
         net localgroup "Remote Desktop Users" $randUser /add
         
-        # Lưu vào biến môi trường để bước sau in ra log
+        # Che giấu pass trên log
+        echo "::add-mask::$randPass"
+        
         echo "FINAL_USER=$randUser" >> $env:GITHUB_ENV
         echo "FINAL_PASS=$randPass" >> $env:GITHUB_ENV
 
