@@ -1,12 +1,18 @@
-name: Windows RDP Persistent via Tailscale
+name: Windows RDP Persistent
 
 on:
   workflow_dispatch: 
     inputs:
       hostname:
-        description: 'Nhập tên máy ảo (vd: pc-cua-toi, win-test...)'
+        description: '1. Tên máy ảo (vd: pc-test)'
         required: true
         default: 'github-win'
+      username:
+        description: '2. Tên đăng nhập (Bỏ trống để tạo ngẫu nhiên)'
+        required: false
+      password:
+        description: '3. Mật khẩu (Bỏ trống để tạo ngẫu nhiên)'
+        required: false
 
 jobs:
   build:
@@ -14,80 +20,79 @@ jobs:
     timeout-minutes: 360 
 
     steps:
-    - name: 1. Setup RDP, Tắt chế độ ngủ & Tạo User ngẫu nhiên
+    - name: 1. Setup RDP & Tạo User
       shell: powershell
       run: |
-        # Bật RDP
         Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0
         Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0
         Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
         
-        # Ép Windows không ngủ
         powercfg /change standby-timeout-ac 0
         powercfg /change monitor-timeout-ac 0
         powercfg /change hibernate-timeout-ac 0
+        Set-MpPreference -DisableRealtimeMonitoring $true
         
-        # TẠO USER VÀ PASS NGẪU NHIÊN
-        $randUser = "user" + (Get-Random -Minimum 1000 -Maximum 9999)
-        $randPass = "P@" + (Get-Random -Minimum 10000 -Maximum 99999) + "abc!"
+        # --- XỬ LÝ TÊN ĐĂNG NHẬP ---
+        $inputUser = "${{ github.event.inputs.username }}"
+        if ([string]::IsNullOrWhiteSpace($inputUser)) {
+            # Nếu bỏ trống thì tạo ngẫu nhiên
+            $randUser = "user" + (Get-Random -Minimum 1000 -Maximum 9999)
+        } else {
+            # Nếu có nhập thì lấy tên đã nhập
+            $randUser = $inputUser
+        }
+
+        # --- XỬ LÝ MẬT KHẨU ---
+        $inputPass = "${{ github.event.inputs.password }}"
+        if ([string]::IsNullOrWhiteSpace($inputPass)) {
+            # Nếu bỏ trống thì tạo ngẫu nhiên (Đảm bảo đủ độ mạnh cho Windows)
+            $randPass = "P@" + (Get-Random -Minimum 10000 -Maximum 99999) + "abc!"
+        } else {
+            # Nếu có nhập thì lấy pass đã nhập
+            $randPass = $inputPass
+        }
         
         # Tạo user trên Windows
         net user $randUser $randPass /add
-        # Phân quyền Admin và cho phép RDP
         net localgroup administrators $randUser /add
         net localgroup "Remote Desktop Users" $randUser /add
         
-        # Lưu thông tin vào biến môi trường để xài cho bước sau
-        echo "RAND_USER=$randUser" >> $env:GITHUB_ENV
-        echo "RAND_PASS=$randPass" >> $env:GITHUB_ENV
+        # Lưu vào biến môi trường để bước sau in ra log
+        echo "FINAL_USER=$randUser" >> $env:GITHUB_ENV
+        echo "FINAL_PASS=$randPass" >> $env:GITHUB_ENV
 
-    - name: 2. Cài đặt & Kết nối Tailscale
+    - name: 2. Cài đặt Tailscale
       shell: powershell
       env:
         TAILSCALE_AUTHKEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
       run: |
-        $url = "https://pkgs.tailscale.com/stable/tailscale-setup-latest.exe"
-        Invoke-WebRequest -Uri $url -OutFile "$env:TEMP\tailscale-setup.exe"
-        Start-Process -FilePath "$env:TEMP\tailscale-setup.exe" -ArgumentList "/quiet" -Wait
+        winget install --id Tailscale.Tailscale -e --silent --accept-package-agreements --accept-source-agreements
+        Start-Sleep -Seconds 5
         
-        # Sử dụng tên máy do người dùng nhập từ bảng
+        $tsPath = "C:\Program Files\Tailscale\tailscale.exe"
         $hostname = "${{ github.event.inputs.hostname }}"
-        & "C:\Program Files\Tailscale\tailscale.exe" up --authkey $env:TAILSCALE_AUTHKEY --hostname $hostname --unattended
+        
+        & $tsPath up --authkey $env:TAILSCALE_AUTHKEY --hostname $hostname --unattended
 
-    - name: 3. Hiển thị thông tin & Giữ phiên chạy
+    - name: 3. Lấy thông tin & Giữ máy chạy
       shell: powershell
       run: |
-        $ip = & "C:\Program Files\Tailscale\tailscale.exe" ip -4
+        $tsPath = "C:\Program Files\Tailscale\tailscale.exe"
+        $ip = & $tsPath ip -4
         
         Write-Host "=============================================="
         Write-Host "MÁY ẢO ĐÃ SẴN SÀNG!"
-        Write-Host "IP Address (Tailscale): $ip"
-        Write-Host "Hostname (Tên máy)    : ${{ github.event.inputs.hostname }}"
-        Write-Host "Username (Tài khoản)  : $env:RAND_USER"
-        Write-Host "Password (Mật khẩu)   : $env:RAND_PASS"
+        Write-Host "IP Address: $ip"
+        Write-Host "Hostname  : ${{ github.event.inputs.hostname }}"
+        Write-Host "Username  : $env:FINAL_USER"
+        Write-Host "Password  : $env:FINAL_PASS"
         Write-Host "=============================================="
-        Write-Host "LƯU Ý: Khi kết nối RDP, nếu nó hỏi tài khoản, hãy nhập dạng: .\$env:RAND_USER"
+        Write-Host "Kết nối RDP nhớ nhập tài khoản dạng: .\$env:FINAL_USER"
         
-        # Vòng lặp Watchdog giữ máy chạy 350 phút
         $duration = 350 * 60 
         $elapsed = 0
-        
         while ($elapsed -lt $duration) {
-            Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Đang duy trì kết nối..."
-            
-            $ping = Test-Connection 8.8.8.8 -Count 1 -Quiet
-            if (-not $ping) { Write-Host "Cảnh báo: Mất kết nối mạng!" }
-
-            # Check Tailscale
-            $tsStatus = & "C:\Program Files\Tailscale\tailscale.exe" status
-            if ($LASTEXITCODE -ne 0) {
-                & "C:\Program Files\Tailscale\tailscale.exe" up --authkey $env:TAILSCALE_AUTHKEY --hostname "${{ github.event.inputs.hostname }}" --unattended
-            }
-
-            # Check RDP
-            $rdpService = Get-Service -Name TermService
-            if ($rdpService.Status -ne 'Running') { Start-Service -Name TermService }
-
+            Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Máy vẫn đang chạy..."
             Start-Sleep -Seconds 300
             $elapsed += 300
         }
