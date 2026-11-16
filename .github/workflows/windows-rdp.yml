@@ -8,10 +8,13 @@ on:
         required: true
         default: 'github-win'
       username:
-        description: '2. Tên đăng nhập (Bỏ trống để ngẫu nhiên)'
+        description: '2. Tên đăng nhập (Bỏ trống để random)'
         required: false
       password:
-        description: '3. Mật khẩu (Bỏ trống để ngẫu nhiên)'
+        description: '3. Mật khẩu (Bỏ trống để random)'
+        required: false
+      ts_token:
+        description: '4. Tailscale Token (Bỏ trống để dùng Token trong Secrets)'
         required: false
 
 jobs:
@@ -32,12 +35,7 @@ jobs:
         powercfg /change hibernate-timeout-ac 0
         Set-MpPreference -DisableRealtimeMonitoring $true
         
-        # --- TẮT CHÍNH SÁCH MẬT KHẨU PHỨC TẠP CỦA WINDOWS ---
-        secedit /export /cfg C:\secpol.cfg
-        (Get-Content C:\secpol.cfg).replace("PasswordComplexity = 1", "PasswordComplexity = 0") | Set-Content C:\secpol.cfg
-        secedit /configure /db C:\windows\security\local.sdb /cfg C:\secpol.cfg /areas SECURITYPOLICY
-        
-        # --- XỬ LÝ TÊN ĐĂNG NHẬP ---
+        # Xử lý Tên đăng nhập
         $inputUser = "${{ github.event.inputs.username }}"
         if ([string]::IsNullOrWhiteSpace($inputUser)) {
             $randUser = "user" + (Get-Random -Minimum 1000 -Maximum 9999)
@@ -45,7 +43,7 @@ jobs:
             $randUser = $inputUser
         }
 
-        # --- XỬ LÝ MẬT KHẨU ---
+        # Xử lý Mật khẩu
         $inputPass = "${{ github.event.inputs.password }}"
         if ([string]::IsNullOrWhiteSpace($inputPass)) {
             $randPass = "P@" + (Get-Random -Minimum 10000 -Maximum 99999) + "abc!"
@@ -53,15 +51,9 @@ jobs:
             $randPass = $inputPass
         }
         
-        # Tạo user trên Windows
         net user $randUser $randPass /add
-        
-        # Phân quyền (nếu tạo user thành công thì bước này sẽ chạy)
         net localgroup administrators $randUser /add
         net localgroup "Remote Desktop Users" $randUser /add
-        
-        # Che giấu pass trên log
-        echo "::add-mask::$randPass"
         
         echo "FINAL_USER=$randUser" >> $env:GITHUB_ENV
         echo "FINAL_PASS=$randPass" >> $env:GITHUB_ENV
@@ -69,15 +61,28 @@ jobs:
     - name: 2. Cài đặt Tailscale
       shell: powershell
       env:
-        TAILSCALE_AUTHKEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+        # Ưu tiên lấy token từ ô nhập, nếu trống thì lấy từ Secrets
+        INPUT_TOKEN: ${{ github.event.inputs.ts_token }}
+        SECRET_TOKEN: ${{ secrets.TAILSCALE_AUTH_KEY }}
       run: |
+        # Chọn token để dùng
+        if ([string]::IsNullOrWhiteSpace($env:INPUT_TOKEN)) {
+            $token = $env:SECRET_TOKEN
+        } else {
+            $token = $env:INPUT_TOKEN
+        }
+
+        # Mã hóa token trên log để không ai thấy được
+        Write-Host "::add-mask::$token"
+
         winget install --id Tailscale.Tailscale -e --silent --accept-package-agreements --accept-source-agreements
         Start-Sleep -Seconds 5
         
         $tsPath = "C:\Program Files\Tailscale\tailscale.exe"
         $hostname = "${{ github.event.inputs.hostname }}"
         
-        & $tsPath up --authkey $env:TAILSCALE_AUTHKEY --hostname $hostname --unattended
+        # Kết nối Tailscale
+        & $tsPath up --authkey $token --hostname $hostname --unattended
 
     - name: 3. Lấy thông tin & Giữ máy chạy
       shell: powershell
