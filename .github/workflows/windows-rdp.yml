@@ -8,13 +8,10 @@ on:
         required: true
         default: 'github-win'
       username:
-        description: '2. Tên đăng nhập (Bỏ trống để random)'
+        description: '2. Tên đăng nhập (Bỏ trống để tạo ngẫu nhiên)'
         required: false
       password:
-        description: '3. Mật khẩu (Nhập gì cũng được, kể cả pass đơn giản)'
-        required: false
-      ts_token:
-        description: '4. Tailscale Token (Bỏ trống để dùng Token trong Secrets)'
+        description: '3. Mật khẩu (Bỏ trống để tạo ngẫu nhiên)'
         required: false
 
 jobs:
@@ -26,7 +23,6 @@ jobs:
     - name: 1. Setup RDP & Tạo User
       shell: powershell
       run: |
-        # Bật RDP
         Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0
         Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0
         Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
@@ -36,57 +32,47 @@ jobs:
         powercfg /change hibernate-timeout-ac 0
         Set-MpPreference -DisableRealtimeMonitoring $true
         
-        # --- TẮT CHÍNH SÁCH MẬT KHẨU KHÓ CHỊU CỦA WINDOWS ---
-        secedit /export /cfg C:\secpol.cfg
-        (Get-Content C:\secpol.cfg) -replace "PasswordComplexity = 1", "PasswordComplexity = 0" | Set-Content C:\secpol.cfg
-        (Get-Content C:\secpol.cfg) -replace "MinimumPasswordLength = \d+", "MinimumPasswordLength = 0" | Set-Content C:\secpol.cfg
-        secedit /configure /db C:\windows\security\local.sdb /cfg C:\secpol.cfg /areas SECURITYPOLICY
-        # -----------------------------------------------------
-
-        # Xử lý Tên đăng nhập
+        # --- XỬ LÝ TÊN ĐĂNG NHẬP ---
         $inputUser = "${{ github.event.inputs.username }}"
         if ([string]::IsNullOrWhiteSpace($inputUser)) {
+            # Nếu bỏ trống thì tạo ngẫu nhiên
             $randUser = "user" + (Get-Random -Minimum 1000 -Maximum 9999)
         } else {
-            $randUser = $inputUser.Trim()
+            # Nếu có nhập thì lấy tên đã nhập
+            $randUser = $inputUser
         }
 
-        # Xử lý Mật khẩu
+        # --- XỬ LÝ MẬT KHẨU ---
         $inputPass = "${{ github.event.inputs.password }}"
         if ([string]::IsNullOrWhiteSpace($inputPass)) {
+            # Nếu bỏ trống thì tạo ngẫu nhiên (Đảm bảo đủ độ mạnh cho Windows)
             $randPass = "P@" + (Get-Random -Minimum 10000 -Maximum 99999) + "abc!"
         } else {
-            $randPass = $inputPass.Trim()
+            # Nếu có nhập thì lấy pass đã nhập
+            $randPass = $inputPass
         }
         
-        # Tạo user
+        # Tạo user trên Windows
         net user $randUser $randPass /add
         net localgroup administrators $randUser /add
         net localgroup "Remote Desktop Users" $randUser /add
         
+        # Lưu vào biến môi trường để bước sau in ra log
         echo "FINAL_USER=$randUser" >> $env:GITHUB_ENV
         echo "FINAL_PASS=$randPass" >> $env:GITHUB_ENV
 
     - name: 2. Cài đặt Tailscale
       shell: powershell
       env:
-        INPUT_TOKEN: ${{ github.event.inputs.ts_token }}
-        SECRET_TOKEN: ${{ secrets.TAILSCALE_AUTH_KEY }}
+        TAILSCALE_AUTHKEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
       run: |
-        if ([string]::IsNullOrWhiteSpace($env:INPUT_TOKEN)) {
-            $token = $env:SECRET_TOKEN
-        } else {
-            $token = $env:INPUT_TOKEN.Trim()
-        }
-        Write-Host "::add-mask::$token"
-
         winget install --id Tailscale.Tailscale -e --silent --accept-package-agreements --accept-source-agreements
         Start-Sleep -Seconds 5
         
         $tsPath = "C:\Program Files\Tailscale\tailscale.exe"
         $hostname = "${{ github.event.inputs.hostname }}"
         
-        & $tsPath up --authkey $token --hostname $hostname --unattended
+        & $tsPath up --authkey $env:TAILSCALE_AUTHKEY --hostname $hostname --unattended
 
     - name: 3. Lấy thông tin & Giữ máy chạy
       shell: powershell
