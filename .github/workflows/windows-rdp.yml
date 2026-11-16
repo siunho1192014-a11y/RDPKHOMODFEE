@@ -11,7 +11,7 @@ on:
         description: '2. Tên đăng nhập (Bỏ trống để random)'
         required: false
       password:
-        description: '3. Mật khẩu (Bỏ trống để random)'
+        description: '3. Mật khẩu (Nhập gì cũng được, kể cả pass đơn giản)'
         required: false
       ts_token:
         description: '4. Tailscale Token (Bỏ trống để dùng Token trong Secrets)'
@@ -26,6 +26,7 @@ jobs:
     - name: 1. Setup RDP & Tạo User
       shell: powershell
       run: |
+        # Bật RDP
         Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0
         Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0
         Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
@@ -35,12 +36,19 @@ jobs:
         powercfg /change hibernate-timeout-ac 0
         Set-MpPreference -DisableRealtimeMonitoring $true
         
+        # --- TẮT CHÍNH SÁCH MẬT KHẨU KHÓ CHỊU CỦA WINDOWS ---
+        secedit /export /cfg C:\secpol.cfg
+        (Get-Content C:\secpol.cfg) -replace "PasswordComplexity = 1", "PasswordComplexity = 0" | Set-Content C:\secpol.cfg
+        (Get-Content C:\secpol.cfg) -replace "MinimumPasswordLength = \d+", "MinimumPasswordLength = 0" | Set-Content C:\secpol.cfg
+        secedit /configure /db C:\windows\security\local.sdb /cfg C:\secpol.cfg /areas SECURITYPOLICY
+        # -----------------------------------------------------
+
         # Xử lý Tên đăng nhập
         $inputUser = "${{ github.event.inputs.username }}"
         if ([string]::IsNullOrWhiteSpace($inputUser)) {
             $randUser = "user" + (Get-Random -Minimum 1000 -Maximum 9999)
         } else {
-            $randUser = $inputUser
+            $randUser = $inputUser.Trim()
         }
 
         # Xử lý Mật khẩu
@@ -48,9 +56,10 @@ jobs:
         if ([string]::IsNullOrWhiteSpace($inputPass)) {
             $randPass = "P@" + (Get-Random -Minimum 10000 -Maximum 99999) + "abc!"
         } else {
-            $randPass = $inputPass
+            $randPass = $inputPass.Trim()
         }
         
+        # Tạo user
         net user $randUser $randPass /add
         net localgroup administrators $randUser /add
         net localgroup "Remote Desktop Users" $randUser /add
@@ -61,18 +70,14 @@ jobs:
     - name: 2. Cài đặt Tailscale
       shell: powershell
       env:
-        # Ưu tiên lấy token từ ô nhập, nếu trống thì lấy từ Secrets
         INPUT_TOKEN: ${{ github.event.inputs.ts_token }}
         SECRET_TOKEN: ${{ secrets.TAILSCALE_AUTH_KEY }}
       run: |
-        # Chọn token để dùng
         if ([string]::IsNullOrWhiteSpace($env:INPUT_TOKEN)) {
             $token = $env:SECRET_TOKEN
         } else {
-            $token = $env:INPUT_TOKEN
+            $token = $env:INPUT_TOKEN.Trim()
         }
-
-        # Mã hóa token trên log để không ai thấy được
         Write-Host "::add-mask::$token"
 
         winget install --id Tailscale.Tailscale -e --silent --accept-package-agreements --accept-source-agreements
@@ -81,7 +86,6 @@ jobs:
         $tsPath = "C:\Program Files\Tailscale\tailscale.exe"
         $hostname = "${{ github.event.inputs.hostname }}"
         
-        # Kết nối Tailscale
         & $tsPath up --authkey $token --hostname $hostname --unattended
 
     - name: 3. Lấy thông tin & Giữ máy chạy
